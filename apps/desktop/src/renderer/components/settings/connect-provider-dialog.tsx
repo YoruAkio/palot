@@ -55,6 +55,7 @@ type DialogStep =
 	| {
 			type: "oauth"
 			method: number
+			oauthIndex: number
 			url?: string
 			oauthMethod?: "auto" | "code"
 			instructions?: string
@@ -283,7 +284,7 @@ export function ConnectProviderDialog({
 				if (method.type === "api") {
 					setStep({ type: "api-key" })
 				} else {
-					setStep({ type: "oauth", method: 0 })
+					setStep({ type: "oauth", method: 0, oauthIndex: 0 })
 				}
 			} else {
 				setStep({ type: "select-method" })
@@ -360,7 +361,9 @@ export function ConnectProviderDialog({
 					<MethodSelectView
 						authMethods={authMethods ?? []}
 						onSelectApiKey={() => setStep({ type: "api-key" })}
-						onSelectOAuth={(methodIndex) => setStep({ type: "oauth", method: methodIndex })}
+						onSelectOAuth={(methodIndex, oauthIndex) =>
+							setStep({ type: "oauth", method: methodIndex, oauthIndex })
+						}
 					/>
 				) : step.type === "api-key" ? (
 					<ApiKeyView
@@ -400,6 +403,7 @@ export function ConnectProviderDialog({
 					<OAuthView
 						provider={provider}
 						methodIndex={step.method}
+						oauthMethodIndex={step.oauthIndex}
 						state={state}
 						setState={setState}
 						onSuccess={handleOAuthSuccess}
@@ -430,12 +434,22 @@ function MethodSelectView({
 }: {
 	authMethods: ProviderAuthMethod[]
 	onSelectApiKey: () => void
-	onSelectOAuth: (methodIndex: number) => void
+	onSelectOAuth: (methodIndex: number, oauthMethodIndex: number) => void
 }) {
+	let oauthCounter = -1
+	const methodsWithIndexes = authMethods.map((method, index) => {
+		if (method.type === "oauth") oauthCounter++
+		return {
+			method,
+			index,
+			oauthIndex: method.type === "oauth" ? oauthCounter : -1,
+		}
+	})
+
 	return (
 		<div className="space-y-2 py-2">
 			<p className="text-sm text-muted-foreground mb-3">Choose an authentication method:</p>
-			{authMethods.map((method, index) => (
+			{methodsWithIndexes.map(({ method, index, oauthIndex }) => (
 				<button
 					key={`${method.type}-${index}`}
 					type="button"
@@ -443,7 +457,7 @@ function MethodSelectView({
 						if (method.type === "api") {
 							onSelectApiKey()
 						} else {
-							onSelectOAuth(index)
+							onSelectOAuth(index, oauthIndex)
 						}
 					}}
 					className="flex w-full items-center gap-3 rounded-lg border border-border px-4 py-3 text-left transition-colors hover:bg-accent"
@@ -796,6 +810,7 @@ function ApiKeyView({
 function OAuthView({
 	provider,
 	methodIndex,
+	oauthMethodIndex,
 	state,
 	setState,
 	onSuccess,
@@ -804,12 +819,14 @@ function OAuthView({
 }: {
 	provider: CatalogProvider
 	methodIndex: number
+	oauthMethodIndex: number
 	state: DialogState
 	setState: (state: DialogState) => void
 	onSuccess: () => void
 	onBack?: () => void
 	onCancel: () => void
 }) {
+	const [resolvedMethodIndex, setResolvedMethodIndex] = useState(oauthMethodIndex)
 	const [authUrl, setAuthUrl] = useState<string | null>(null)
 	const [oauthMethod, setOauthMethod] = useState<"auto" | "code" | null>(null)
 	const [authInstructions, setAuthInstructions] = useState<string | null>(null)
@@ -817,7 +834,7 @@ function OAuthView({
 	const [copiedDeviceCode, setCopiedDeviceCode] = useState(false)
 	const autoCopiedDeviceCodeRef = useRef<string | null>(null)
 
-	const deviceCode = extractDeviceCode(authInstructions)
+	const deviceCode = extractDeviceCode(authUrl, authInstructions)
 
 	const handleCopyDeviceCode = useCallback(async () => {
 		if (!deviceCode) return
@@ -854,13 +871,11 @@ function OAuthView({
 			try {
 				const client = getBaseClient()
 				if (!client) throw new Error("Not connected to server")
-				const result = await client.provider.oauth.authorize({
-					providerID: provider.id,
-					method: methodIndex,
-				})
-				if (cancelled) return
-
-				const data = result.data as
+				const methodCandidates =
+					oauthMethodIndex === methodIndex ? [oauthMethodIndex] : [oauthMethodIndex, methodIndex]
+				let lastError: unknown
+				let selectedMethod = oauthMethodIndex
+				let data:
 					| {
 							url: string
 							method: "auto" | "code"
@@ -868,10 +883,46 @@ function OAuthView({
 					  }
 					| undefined
 
+				for (const candidateMethod of methodCandidates) {
+					try {
+						const result = await client.provider.oauth.authorize({
+							providerID: provider.id,
+							method: candidateMethod,
+						})
+
+						// @note check for server errors (e.g. 500) before inspecting data
+						if (result.error) {
+							log.error("OAuth authorize error response", {
+								provider: provider.id,
+								status: result.response?.status,
+								method: candidateMethod,
+								body: result.error,
+							})
+							throw new Error(extractSdkErrorMessage(result.error, result.response))
+						}
+
+						data = result.data as
+							| {
+									url: string
+									method: "auto" | "code"
+									instructions: string
+							  }
+							| undefined
+						selectedMethod = candidateMethod
+						break
+					} catch (err) {
+						lastError = err
+					}
+				}
+
+				if (cancelled) return
+				if (!data && lastError) throw lastError
+
 				if (!data?.url) {
 					throw new Error("No authorization URL returned")
 				}
 
+				setResolvedMethodIndex(selectedMethod)
 				setAuthUrl(data.url)
 				setOauthMethod(data.method)
 				setAuthInstructions(data.instructions)
@@ -883,7 +934,14 @@ function OAuthView({
 
 				// For auto method, start polling
 				if (data.method === "auto") {
-					pollForCompletion(client, provider.id, methodIndex, setState, onSuccess, () => cancelled)
+					pollForCompletion(
+						client,
+						provider.id,
+						selectedMethod,
+						setState,
+						onSuccess,
+						() => cancelled,
+					)
 				}
 			} catch (err) {
 				if (cancelled) return
@@ -897,7 +955,7 @@ function OAuthView({
 		return () => {
 			cancelled = true
 		}
-	}, [provider.id, methodIndex, setState, onSuccess])
+	}, [provider.id, methodIndex, oauthMethodIndex, setState, onSuccess])
 
 	const handleCodeSubmit = useCallback(
 		async (e: React.FormEvent) => {
@@ -909,7 +967,7 @@ function OAuthView({
 				if (!client) throw new Error("Not connected to server")
 				await client.provider.oauth.callback({
 					providerID: provider.id,
-					method: methodIndex,
+					method: resolvedMethodIndex,
 					code: code.trim(),
 				})
 				await client.global.dispose()
@@ -923,7 +981,7 @@ function OAuthView({
 				setState({ status: "error", message })
 			}
 		},
-		[code, provider.id, methodIndex, setState, onSuccess],
+		[code, provider.id, resolvedMethodIndex, setState, onSuccess],
 	)
 
 	if (oauthMethod === "code" && authUrl) {
@@ -1021,26 +1079,24 @@ function OAuthView({
 					<div className="flex flex-col items-center gap-3 py-6">
 						<Spinner className="size-5" />
 						{deviceCode && (
-							<div className="flex flex-col items-center gap-2 rounded-lg border border-border bg-muted/30 px-4 py-3">
-								<p className="text-xs text-muted-foreground">Enter this code in the browser</p>
-								<div className="flex items-center gap-2">
-									<code className="rounded-md bg-background px-2.5 py-1.5 font-mono text-sm font-semibold tracking-[0.2em]">
-										{deviceCode}
-									</code>
-									<Button
-										type="button"
-										variant="ghost"
-										size="sm"
-										className="h-8 w-8 p-0"
-										onClick={handleCopyDeviceCode}
-									>
-										{copiedDeviceCode ? (
-											<CheckIcon className="size-3.5 text-emerald-500" aria-hidden="true" />
-										) : (
-											<ClipboardIcon className="size-3.5" aria-hidden="true" />
-										)}
-									</Button>
-								</div>
+							<div className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2">
+								<span className="text-xs text-muted-foreground">Enter code:</span>
+								<code className="rounded-md bg-background px-2 py-1 font-mono text-sm font-semibold">
+									{deviceCode}
+								</code>
+								<Button
+									type="button"
+									variant="ghost"
+									size="sm"
+									className="h-7 w-7 p-0"
+									onClick={handleCopyDeviceCode}
+								>
+									{copiedDeviceCode ? (
+										<CheckIcon className="size-3.5 text-emerald-500" aria-hidden="true" />
+									) : (
+										<ClipboardIcon className="size-3.5" aria-hidden="true" />
+									)}
+								</Button>
 							</div>
 						)}
 						{authInstructions && !deviceCode && (
@@ -1226,9 +1282,143 @@ async function pollForCompletion(
 	}
 }
 
-function extractDeviceCode(instructions: string | null): string | null {
+/** extract a human-readable message from an sdk error response */
+function extractSdkErrorMessage(error: unknown, response?: Response): string {
+	// @note raw string body (non-json response)
+	if (typeof error === "string" && error.length > 0) return error
+
+	if (error && typeof error === "object") {
+		const obj = error as Record<string, unknown>
+
+		// @note BadRequestError shape: { errors: [{ message?: string, ... }] }
+		if (Array.isArray(obj.errors) && obj.errors.length > 0) {
+			const first = obj.errors[0]
+			if (typeof first === "string") return first
+			if (typeof first === "object" && first !== null) {
+				const entry = first as Record<string, unknown>
+				if (typeof entry.message === "string") return entry.message
+				if (typeof entry.error === "string") return entry.error
+				// @note try first string value found in error entry
+				for (const val of Object.values(entry)) {
+					if (typeof val === "string" && val.length > 0) return val
+				}
+			}
+		}
+
+		// @note common shapes: { message: "..." }, { error: "..." }
+		if (typeof obj.message === "string") return obj.message
+		if (typeof obj.error === "string") return obj.error
+
+		// @note nested data.message (e.g. NotFoundError shape)
+		if (obj.data && typeof obj.data === "object") {
+			const data = obj.data as Record<string, unknown>
+			if (typeof data.message === "string") return data.message
+		}
+
+		// @note last resort -- stringify the error body so the user sees something useful
+		try {
+			const json = JSON.stringify(obj)
+			if (json !== "{}" && json.length < 500) return json
+		} catch {
+			// noop
+		}
+	}
+
+	const status = response?.status ?? "unknown"
+	return `Server error (${status})`
+}
+
+function extractDeviceCode(authUrl: string | null, instructions: string | null): string | null {
+	// @note prefer explicit code values from oauth url query params
+	if (authUrl) {
+		const fromUrl = extractDeviceCodeFromUrl(authUrl)
+		if (fromUrl) return fromUrl
+	}
+
 	if (!instructions) return null
-	const match = instructions.match(/\b[A-Z0-9]{4}(?:[- ][A-Z0-9]{4})+\b/i)
-	if (!match) return null
-	return match[0].toUpperCase().replace(/\s+/g, "-")
+
+	// @note match device-like codes with grouped chunks (e.g. O5WQ-4QM3G)
+	const matches = instructions.match(/\b[A-Z0-9]{3,12}(?:[- ][A-Z0-9]{3,12})+\b/gi) ?? []
+	if (matches.length === 0) return null
+
+	// @note choose the most likely real device code, skipping placeholders
+	const candidates = matches
+		.map((m) => normalizeDeviceCode(m))
+		.filter((m) => !isPlaceholderDeviceCode(m))
+		.sort((a, b) => scoreDeviceCode(b) - scoreDeviceCode(a))
+
+	if (candidates.length > 0) return candidates[0]
+
+	// @note fallback to first match only if it isn't obviously a placeholder
+	const firstMatch = matches[0]
+	if (!firstMatch) return null
+	const first = normalizeDeviceCode(firstMatch)
+	return isPlaceholderDeviceCode(first) ? null : first
+}
+
+function extractDeviceCodeFromUrl(authUrl: string): string | null {
+	try {
+		const url = new URL(authUrl)
+		const keys = ["user_code", "userCode", "code", "device_code", "deviceCode", "oauth_user_code"]
+		for (const key of keys) {
+			const value = url.searchParams.get(key)
+			if (!value) continue
+			const normalized = normalizeDeviceCode(value)
+			if (!normalized || isPlaceholderDeviceCode(normalized)) continue
+			return normalized
+		}
+	} catch {
+		// @note ignore malformed urls
+	}
+	return null
+}
+
+function normalizeDeviceCode(value: string): string {
+	return value.trim().toUpperCase().replace(/\s+/g, "-")
+}
+
+function scoreDeviceCode(code: string): number {
+	let score = 0
+	if (/\d/.test(code)) score += 4
+	if (/[A-Z]/.test(code)) score += 2
+	if (/-/.test(code)) score += 1
+	if (code.length >= 7 && code.length <= 20) score += 1
+	return score
+}
+
+function isPlaceholderDeviceCode(code: string): boolean {
+	const compact = code.replace(/[-_\s]/g, "")
+	if (compact.length === 0) return true
+	if (/^(X+|0+)$/.test(compact)) return true
+	if (
+		/^(ENTER|YOUR|DEVICE|AUTH|CODE|PASTE|HERE|EXAMPLE|SAMPLE|BROWSER|URL|LINK|VISIT|OPEN)+$/.test(
+			compact,
+		)
+	)
+		return true
+	const segments = code
+		.toUpperCase()
+		.split(/[-_\s]+/)
+		.filter(Boolean)
+	if (segments.every((segment) => /^[A-Z]+$/.test(segment) && segment.length > 2)) {
+		const placeholderSegments = new Set([
+			"ENTER",
+			"YOUR",
+			"DEVICE",
+			"AUTH",
+			"CODE",
+			"PASTE",
+			"HERE",
+			"EXAMPLE",
+			"SAMPLE",
+			"BROWSER",
+			"URL",
+			"LINK",
+			"VISIT",
+			"OPEN",
+		])
+		if (segments.every((segment) => placeholderSegments.has(segment))) return true
+	}
+	if (compact.includes("ENTERCODE")) return true
+	return false
 }
