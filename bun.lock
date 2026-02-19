@@ -71,6 +71,8 @@
         "vite-plugin-static-copy": "^3.2.0",
       },
       "optionalDependencies": {
+        "@libsql/darwin-arm64": "0.5.22",
+        "@libsql/darwin-x64": "0.5.22",
         "electron-liquid-glass": "^1.1.1",
       },
     },

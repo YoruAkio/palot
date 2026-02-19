@@ -149,21 +149,25 @@ jobs:
             platform: linux
             eb-flags: "--linux"
             artifact-name: release-linux
+            libsql-package: ""
           - name: macos-arm64
             os: macos-latest
             platform: mac
             eb-flags: "--mac --arm64"
             artifact-name: release-macos-arm64
+            libsql-package: "@libsql/darwin-arm64"
           - name: macos-x64
             os: macos-15-intel
             platform: mac
             eb-flags: "--mac --x64"
             artifact-name: release-macos-x64
+            libsql-package: "@libsql/darwin-x64"
           - name: windows-x64
             os: windows-latest
             platform: win
             eb-flags: "--win"
             artifact-name: release-windows
+            libsql-package: ""
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -192,6 +196,11 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Verify libsql native package (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          test -d "node_modules/${{ matrix.libsql-package }}"
 
       - name: Download build output
         uses: actions/download-artifact@v4
