@@ -7,12 +7,28 @@ directories:
 
 files:
   - "out/**/*"
-  # Native N-API addon for macOS liquid glass / vibrancy effects.
-  # Must be included because externalizeDepsPlugin keeps it external.
-  - "node_modules/electron-liquid-glass/**/*"
-  # LibSQL loads platform-specific binaries via dynamic require().
-  - "node_modules/libsql/**/*"
-  - "node_modules/@libsql/**/*"
+  # Native runtime dependencies are hoisted to repo-root node_modules in this Bun workspace.
+  # Copy them explicitly into app node_modules so electron-builder's Bun collector cannot miss them.
+  - from: "../../node_modules/electron-liquid-glass"
+    to: "node_modules/electron-liquid-glass"
+    filter:
+      - "**/*"
+  - from: "../../node_modules/libsql"
+    to: "node_modules/libsql"
+    filter:
+      - "**/*"
+  - from: "../../node_modules/@libsql"
+    to: "node_modules/@libsql"
+    filter:
+      - "**/*"
+  - from: "../../node_modules/@neon-rs"
+    to: "node_modules/@neon-rs"
+    filter:
+      - "**/*"
+  - from: "../../node_modules/detect-libc"
+    to: "node_modules/detect-libc"
+    filter:
+      - "**/*"
 
 # Bundle the CLI launcher script into the app package.
 # macOS: Contents/Resources/bin/palot

@@ -220,6 +220,13 @@ jobs:
           # CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
           # CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
 
+      - name: Verify packaged libsql binary (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          APP_PATH="$(find apps/desktop/release/mac -maxdepth 1 -name '*.app' | head -n 1)"
+          test -n "$APP_PATH"
+          test -f "$APP_PATH/Contents/Resources/app.asar.unpacked/node_modules/${{ matrix.libsql-package }}/index.node"
+
       - name: Upload artifacts (Linux)
         if: matrix.platform == 'linux'
         uses: actions/upload-artifact@v4
